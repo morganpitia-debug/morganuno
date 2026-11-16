@@ -1,0 +1,7 @@
+{
+  "name": "tabletop-tumble",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A living-room multiplayer shedding card game",
+  "scripts": { "start": "node server.js" }
+}
