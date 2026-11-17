@@ -5,8 +5,21 @@ const crypto = require('node:crypto');
 const os = require('node:os');
 
 const PORT = Number(process.env.PORT || 3000), ROOT = path.join(__dirname, 'public'), rooms = new Map();
+const PUBLIC_ORIGIN = process.env.PUBLIC_URL ? new URL(process.env.PUBLIC_URL).origin : null;
 const MIME = { '.html':'text/html; charset=utf-8', '.css':'text/css; charset=utf-8', '.js':'text/javascript; charset=utf-8', '.svg':'image/svg+xml' };
 const COLORS = ['coral','ocean','sun','moss'], AVATARS = ['🌞','🌊','🌿','🔥','🌙','🍊','⭐','🪷'];
+function requestOrigin(req){
+  if(PUBLIC_ORIGIN)return PUBLIC_ORIGIN;
+  const forwardedHost=String(req.headers['x-forwarded-host']||'').split(',')[0].trim();
+  const host=forwardedHost||String(req.headers.host||'localhost').split(',')[0].trim();
+  const proto=String(req.headers['x-forwarded-proto']||'http').split(',')[0].trim();
+  if(forwardedHost||!/^localhost(?::\d+)?$|^127\.0\.0\.1(?::\d+)?$/.test(host)){
+    try{return new URL(`${proto}://${host}`).origin;}catch{}
+  }
+  const ips=Object.values(os.networkInterfaces()).flat().filter(x=>x&&!x.internal&&(x.family==='IPv4'||x.family===4));
+  const ip=ips.sort((a,b)=>Number(b.address.startsWith('192.168.'))-Number(a.address.startsWith('192.168.')))[0]?.address||'localhost';
+  return `http://${ip}:${PORT}`;
+}
 const server = http.createServer((req,res)=>{
   let pathname; try { pathname = decodeURIComponent(new URL(req.url,`http://${req.headers.host}`).pathname); } catch { res.writeHead(400).end(); return; }
   const full = path.resolve(ROOT, pathname === '/' ? 'index.html' : pathname.slice(1));
@@ -19,7 +32,7 @@ function listen(s,head){let b=head||Buffer.alloc(0);s.on('data',c=>{b=Buffer.con
 const newCard=(color,face)=>({id:crypto.randomUUID(),color,face});
 function deck(){const a=[];for(const c of COLORS){a.push(newCard(c,'0'));for(let n=1;n<=9;n++)a.push(newCard(c,''+n),newCard(c,''+n));for(const f of ['Skip','Reverse','Draw Two'])a.push(newCard(c,f),newCard(c,f));}for(let i=0;i<4;i++)a.push(newCard('wild','Wild'),newCard('wild','Wild Four'));return a;}
 function shuffle(a){for(let i=a.length-1;i>0;i--){const j=Math.random()*(i+1)|0;[a[i],a[j]]=[a[j],a[i]];}return a;}
-function publicState(r){const allIps=Object.values(os.networkInterfaces()).flat().filter(x=>x&&!x.internal&&(x.family==='IPv4'||x.family===4));const ip=allIps.sort((a,b)=>Number(b.address.startsWith('192.168.'))-Number(a.address.startsWith('192.168.')))[0]?.address||'localhost';return{type:'state',code:r.code,joinUrl:`http://${ip}:${PORT}/?room=${r.code}`,phase:r.phase,host:r.host,turn:r.turn,direction:r.direction,activeColor:r.activeColor,top:r.discard.at(-1)||null,drawCount:r.draw.length,winner:r.winner,round:r.round,roundPoints:r.roundPoints||0,scores:r.players.map(p=>({id:p.id,name:p.name,score:p.score})),rules:r.rules,pendingPenalty:r.pendingPenalty,penaltyKind:r.penaltyKind,uncalled:r.uncalled,players:r.players.map((p,i)=>({id:p.id,name:p.name,avatar:p.avatar,count:p.hand.length,ready:p.ready,seat:i,called:p.called})),you:null};}
+function publicState(r){return{type:'state',code:r.code,joinUrl:`${r.publicOrigin||'http://localhost:'+PORT}/?room=${r.code}`,phase:r.phase,host:r.host,turn:r.turn,direction:r.direction,activeColor:r.activeColor,top:r.discard.at(-1)||null,drawCount:r.draw.length,winner:r.winner,round:r.round,roundPoints:r.roundPoints||0,scores:r.players.map(p=>({id:p.id,name:p.name,score:p.score})),rules:r.rules,pendingPenalty:r.pendingPenalty,penaltyKind:r.penaltyKind,uncalled:r.uncalled,players:r.players.map((p,i)=>({id:p.id,name:p.name,avatar:p.avatar,count:p.hand.length,ready:p.ready,seat:i,called:p.called})),you:null};}
 function broadcast(r){const base=publicState(r);for(const p of r.players)for(const s of p.sockets||[])send(s,{...base,you:p.id,...(s.display?{}:{hand:p.hand,drawnCard:p.drawnCard||null})});}
 function refill(r){if(!r.draw.length&&r.discard.length>1){const top=r.discard.pop();r.draw=shuffle(r.discard);r.discard=[top];}}
 function next(r,n=1){r.turn=(r.turn+r.direction*n+r.players.length*n)%r.players.length;}
@@ -45,8 +58,9 @@ function completePlay(r,p,c,color,targetId){p.hand.splice(p.hand.findIndex(x=>x.
 function handle(s,m){
  if(m.type==='join'){
   let code=String(m.code||'').toUpperCase().replace(/[^A-Z]/g,'').slice(0,4),r=rooms.get(code);
-  if(!r&&m.create){do{code=Array.from({length:4},()=> 'ABCDEFGHJKLMNPQRSTUVWXYZ'[Math.random()*24|0]).join('');}while(rooms.has(code));r={code,phase:'lobby',host:null,turn:0,direction:1,activeColor:null,draw:[],discard:[],players:[],rules:{stacking:false,drawUntilPlayable:false,sevenZero:false},pendingPenalty:0,penaltyKind:null,pendingSwap:null,uncalled:null,round:1};rooms.set(code,r);}
+  if(!r&&m.create){do{code=Array.from({length:4},()=> 'ABCDEFGHJKLMNPQRSTUVWXYZ'[Math.random()*24|0]).join('');}while(rooms.has(code));r={code,publicOrigin:s.publicOrigin,phase:'lobby',host:null,turn:0,direction:1,activeColor:null,draw:[],discard:[],players:[],rules:{stacking:false,drawUntilPlayable:false,sevenZero:false},pendingPenalty:0,penaltyKind:null,pendingSwap:null,uncalled:null,round:1};rooms.set(code,r);}
   if(!r)return send(s,{type:'error',message:'Room not found. Check the code and try again.'});let p=r.players.find(x=>x.token===String(m.token||'')&&m.token);
+  if(!r.publicOrigin)r.publicOrigin=s.publicOrigin;
   if(p){p.name=String(m.name||p.name).slice(0,18)||p.name;}else{if(r.phase!=='lobby'||r.players.length>=8)return send(s,{type:'error',message:'This room has started or is full.'});p={id:crypto.randomUUID(),token:crypto.randomUUID(),name:String(m.name||'').trim().slice(0,18)||`Player ${r.players.length+1}`,avatar:AVATARS.includes(m.avatar)?m.avatar:AVATARS[r.players.length],ready:!r.host,called:false,hand:[],score:0,sockets:new Set()};if(!r.host)r.host=p.id;r.players.push(p);}
   p.sockets ||= new Set();p.sockets.add(s);s.display=!!m.display;s.player=p;s.room=r;s.on('close',()=>{p.sockets.delete(s);broadcast(r);});send(s,{type:'welcome',token:p.token,code:r.code});broadcast(r);return;
  }
@@ -74,5 +88,5 @@ function handle(s,m){
  if(m.type==='swap'&&r.phase==='playing'&&r.pendingSwap?.player===p.id){const t=r.players.find(x=>x.id===m.targetId);if(t&&t!==p){[p.hand,t.hand]=[t.hand,p.hand];r.pendingSwap=null;broadcast(r);}return;}
  if(m.type==='restart'&&r.phase==='roundover'){r.round++;deal(r);broadcast(r);}
 }
-server.on('upgrade',(req,s,head)=>{if(req.url!=='/socket')return s.destroy();const key=req.headers['sec-websocket-key'];if(!key)return s.destroy();const accept=crypto.createHash('sha1').update(key+'258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');s.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);listen(s,head);});
+server.on('upgrade',(req,s,head)=>{if(req.url!=='/socket')return s.destroy();const key=req.headers['sec-websocket-key'];if(!key)return s.destroy();s.publicOrigin=requestOrigin(req);const accept=crypto.createHash('sha1').update(key+'258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');s.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);listen(s,head);});
 server.listen(PORT,'0.0.0.0',()=>console.log(`Tabletop Tumble is ready at http://localhost:${PORT}`));
